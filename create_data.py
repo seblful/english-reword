@@ -10,7 +10,8 @@ JSON_NAME = "phrasal_verbs.json"
 
 def main() -> None:
     formatter = RewordFormatter(data_dir=DATA,
-                                max_words=200)
+                                use_description=True,
+                                max_words=5000)
 
     formatter.format_json(json_name=JSON_NAME)
 

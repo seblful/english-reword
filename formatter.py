@@ -7,6 +7,7 @@ import csv
 class RewordFormatter:
     def __init__(self,
                  data_dir: str,
+                 use_description: bool = True,
                  max_words: int = None,
                  max_examples: int = 6) -> None:
         # Paths
@@ -14,6 +15,7 @@ class RewordFormatter:
         self.outputs_dir = os.path.join(data_dir, "outputs")
 
         # Limitations
+        self.use_description = use_description
         self.max_words = max_words
         self.max_examples = max_examples
 
@@ -69,12 +71,18 @@ class RewordFormatter:
 
             # Translations
             translations = []
-            trans_values = word_data.get("translations", dict()).values()
 
-            # Add single translations to all translations
-            for value in trans_values:
-                for rus_word in value.keys():
-                    translations.append(rus_word)
+            if self.use_description is True:
+                for description in word_data.get("descriptions", ["?"]):
+                    translations.append(description)
+
+            else:
+                trans_values = word_data.get("translations", dict()).values()
+
+                # Add single translations to all translations
+                for value in trans_values:
+                    for rus_word in value.keys():
+                        translations.append(rus_word)
 
             translation = ", ".join(translations)
             row.append(translation)
