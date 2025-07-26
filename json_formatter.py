@@ -4,7 +4,7 @@ import json
 import csv
 
 
-class RewordFormatter:
+class JsonFormatter:
     def __init__(self,
                  data_dir: str,
                  use_description: bool = True,
@@ -44,7 +44,7 @@ class RewordFormatter:
     def format_json(self, json_name: str) -> None:
         # Open json file and retriece dict
         json_path = os.path.join(self.inputs_dir, json_name)
-        json_dict = RewordFormatter.open_json(json_path)
+        json_dict = JsonFormatter.open_json(json_path)
 
         # Open csv file and init writer
         csv_name = os.path.splitext(json_name)[0] + ".csv"

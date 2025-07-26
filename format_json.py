@@ -1,6 +1,6 @@
 import os
 
-from formatter import RewordFormatter
+from json_formatter import RewordFormatter
 
 HOME = os.getcwd()
 DATA = os.path.join(HOME, "data")
