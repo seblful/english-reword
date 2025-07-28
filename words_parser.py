@@ -170,7 +170,11 @@ class WordHuntParser:
         Returns:
             bool: True if word exists, False otherwise
         """
-        if "К сожалению" in soup.text or "В тексте песен" in soup.text:
+        if (
+            "Проверьте нет ли опечатки. Если такое слово существует, то мы постараемся это исправить."
+            in soup.text
+            or "В тексте песен:" in soup.text
+        ):
             print(f"Word '{word}' not found in WoordHunt")
             return False
         return True
@@ -206,38 +210,46 @@ class WordHuntParser:
             and not tag.has_attr("id")
         )
 
-    def _extract_examples(self, example_block) -> tuple[list, list]:
+    def _extract_examples(
+        self, example_block, num_examples: int = 5
+    ) -> tuple[list, list]:
         """Extract examples and their translations.
 
         Args:
             example_block: BeautifulSoup element containing examples
+            num_examples (int): Number of examples to extract
 
         Returns:
             tuple: Lists of examples and their translations
         """
-        examples = []
-        ex_translations = []
+        eng_examples = []
+        rus_examples = []
 
         if example_block:
-            english_examples = example_block.find_all("p", class_="ex_o")
-            for eng_ex in english_examples:
-                if len(examples) >= 2:
+            eng_example_blocks = example_block.find_all("p", class_="ex_o")
+            for eng_example_block in eng_example_blocks:
+                if len(eng_examples) >= num_examples:
                     break
 
-                eng_text = eng_ex.get_text(strip=True)
-                rus_ex = eng_ex.find_next("p", class_="ex_t human")
-                rus_text = rus_ex.get_text(strip=True)
+                eng_example = eng_example_block.get_text(strip=True)
+                rus_example_block = eng_example_block.find_next(
+                    "p", class_="ex_t human"
+                )
 
-                examples.append(eng_text)
-                ex_translations.append(rus_text)
+                # Only add the example if we have both English and Russian text
+                if rus_example_block:
+                    rus_example = rus_example_block.get_text(strip=True)
+
+                    eng_examples.append(eng_example)
+                    rus_examples.append(rus_example)
 
         # Pad with empty strings if needed
-        while len(examples) < 2:
-            examples.append("")
-        while len(ex_translations) < 2:
-            ex_translations.append("")
+        while len(eng_examples) < num_examples:
+            eng_examples.append("")
+        while len(rus_examples) < num_examples:
+            rus_examples.append("")
 
-        return examples, ex_translations
+        return eng_examples, rus_examples
 
     def parse_word_data(self, word: str) -> dict:
         """Parse WoordHunt data for a single word.
@@ -265,33 +277,20 @@ class WordHuntParser:
 
         # Get examples
         example_block = self._get_example_block(soup)
-        examples, ex_translations = self._extract_examples(example_block)
+        eng_examples, rus_examples = self._extract_examples(example_block)
 
-        return {
+        examples_dict = {
             "word": word,
             "transcription": transcription,
             "translation": translation,
-            "example1": examples[0],
-            "ex_translation1": ex_translations[0],
-            "example2": examples[1],
-            "ex_translation2": ex_translations[1],
         }
+        for i, (eng_example, rus_example) in enumerate(
+            zip(eng_examples, rus_examples), 1
+        ):
+            examples_dict[f"eng_example{i}"] = eng_example
+            examples_dict[f"rus_example{i}"] = rus_example
 
-    def _get_csv_fieldnames(self) -> list:
-        """Get the list of CSV field names.
-
-        Returns:
-            list: List of field names for CSV
-        """
-        return [
-            "word",
-            "transcription",
-            "translation",
-            "example1",
-            "ex_translation1",
-            "example2",
-            "ex_translation2",
-        ]
+        return examples_dict
 
     def _get_next_file_number(self) -> int:
         """Find the next available file number by checking existing files.
@@ -334,44 +333,6 @@ class WordHuntParser:
 
         return os.path.join(self.outputs_dir, f"{base_name}_{file_number}.csv")
 
-    def save_to_csv(self, data: list, words_per_file: int = 1000) -> bool:
-        """Save parsed data to CSV files, splitting into batches.
-
-        Args:
-            data (list): List of dictionaries containing word data
-            words_per_file (int): Number of words per CSV file
-
-        Returns:
-            bool: True if save was successful, False otherwise
-        """
-        if not data:
-            print("No data to save")
-            return False
-
-        try:
-            for i in range(0, len(data), words_per_file):
-                batch_number = (i // words_per_file) + 1
-                batch_data = data[i : i + words_per_file]
-                output_file = self._get_csv_filename(batch_number)
-
-                with open(output_file, "w", newline="", encoding="utf-8") as csvfile:
-                    writer = csv.DictWriter(
-                        csvfile,
-                        fieldnames=self._get_csv_fieldnames(),
-                        delimiter=";",
-                        quotechar='"',
-                        quoting=csv.QUOTE_ALL,
-                    )
-                    writer.writeheader()
-                    for item in batch_data:
-                        if item:  # Only write if data exists
-                            writer.writerow(item)
-                print(f"File {batch_number} saved to {output_file}")
-            return True
-        except IOError as e:
-            print(f"Error writing to CSV file: {e}")
-            return False
-
     def _write_batch_to_csv(self, batch_data: list, batch_number: int) -> bool:
         """Write a batch of words to a CSV file.
 
@@ -387,12 +348,11 @@ class WordHuntParser:
             with open(output_file, "w", newline="", encoding="utf-8") as csvfile:
                 writer = csv.DictWriter(
                     csvfile,
-                    fieldnames=self._get_csv_fieldnames(),
+                    fieldnames=list(batch_data[0].keys()),
                     delimiter=";",
                     quotechar='"',
                     quoting=csv.QUOTE_ALL,
                 )
-                writer.writeheader()
                 for item in batch_data:
                     writer.writerow(item)
             print(f"File {batch_number} saved to {output_file}")
@@ -429,10 +389,10 @@ class WordHuntParser:
             print("Start index exceeds word list length. Starting from beginning.")
             start_index = 0
 
-        words = words[start_index:]
-        total_words = len(words)
+        # Apply both max_words and start_index limits in one slice
+        words = words[start_index:max_words] if max_words else words[start_index:]
         print(
-            f"Found {total_words} words to process starting from index {start_index}..."
+            f"Found {len(words)} words to process starting from index {start_index}..."
         )
 
         current_batch = []
@@ -441,11 +401,8 @@ class WordHuntParser:
         # Get the starting file number based on existing files
         batch_number = self._get_next_file_number()
 
-        # Process all words or up to max_words if specified
-        word_batch = words[:max_words] if max_words else words
-
-        for i, word in enumerate(word_batch, start_index + 1):
-            print(f"Processing {i}/{total_words}: {word}")
+        for i, word in enumerate(words, start_index + 1):
+            print(f"Processing {i}/{len(words)}: {word}")
             word_data = self.parse_word_data(word)
 
             if word_data:
