@@ -14,17 +14,21 @@ class WordHuntParser:
     USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
     YANDEX_DICT_URL = "https://dictionary.yandex.net/api/v1/dicservice.json/lookup"
 
-    def __init__(self, data_dir: str, yandex_api_key: str = None):
+    def __init__(
+        self, data_dir: str, yandex_api_key: str = None, num_examples: int = 5
+    ):
         """Initialize the parser with output directory configuration and API key.
 
         Args:
             data_dir (str): Base directory for output files
             yandex_api_key (str, optional): Yandex Dictionary API key for fallback translations
+            num_examples (int, optional): Number of examples to extract for each word. Defaults to 5
         """
         self.outputs_dir = os.path.join(data_dir, "outputs")
         self.output_file = os.path.join(self.outputs_dir, "word_hunt_data.csv")
         self.headers = {"User-Agent": self.USER_AGENT}
         self.yandex_api_key = yandex_api_key
+        self.num_examples = num_examples
 
     def _fetch_yandex_data(self, word: str) -> dict:
         """Fetch word data from Yandex Dictionary API.
@@ -72,15 +76,23 @@ class WordHuntParser:
                 for tr in definition["tr"]:
                     translations.append(tr.get("text", ""))
 
-                    # Get examples if available
-                    if "ex" in tr and len(eng_examples) < 5:
+                    # Get all available examples
+                    if "ex" in tr:
                         for ex in tr["ex"]:
-                            if "text" in ex and "tr" in ex and len(eng_examples) < 5:
+                            if "text" in ex and "tr" in ex:
                                 eng_examples.append(ex["text"])
                                 rus_examples.append(ex["tr"][0]["text"])
 
+        # Randomly select examples if we have more than needed
+        if len(eng_examples) > self.num_examples:
+            import random
+
+            indices = random.sample(range(len(eng_examples)), self.num_examples)
+            eng_examples = [eng_examples[i] for i in indices]
+            rus_examples = [rus_examples[i] for i in indices]
+
         # Fill missing examples with empty strings
-        while len(eng_examples) < 5:
+        while len(eng_examples) < self.num_examples:
             eng_examples.append("")
             rus_examples.append("")
 
@@ -286,14 +298,11 @@ class WordHuntParser:
             and not tag.has_attr("id")
         )
 
-    def _extract_examples(
-        self, example_block, num_examples: int = 5
-    ) -> tuple[list, list]:
+    def _extract_examples(self, example_block) -> tuple[list, list]:
         """Extract examples and their translations.
 
         Args:
             example_block: BeautifulSoup element containing examples
-            num_examples (int): Number of examples to extract
 
         Returns:
             tuple: Lists of examples and their translations
@@ -303,10 +312,9 @@ class WordHuntParser:
 
         if example_block:
             eng_example_blocks = example_block.find_all("p", class_="ex_o")
-            for eng_example_block in eng_example_blocks:
-                if len(eng_examples) >= num_examples:
-                    break
 
+            # Collect all available examples
+            for eng_example_block in eng_example_blocks:
                 eng_example = eng_example_block.get_text(strip=True)
                 rus_example_block = eng_example_block.find_next(
                     "p", class_="ex_t human"
@@ -315,14 +323,21 @@ class WordHuntParser:
                 # Only add the example if we have both English and Russian text
                 if rus_example_block:
                     rus_example = rus_example_block.get_text(strip=True)
-
                     eng_examples.append(eng_example)
                     rus_examples.append(rus_example)
 
+            # Randomly select up to self.num_examples if we have more
+            if len(eng_examples) > self.num_examples:
+                import random
+
+                indices = random.sample(range(len(eng_examples)), self.num_examples)
+                eng_examples = [eng_examples[i] for i in indices]
+                rus_examples = [rus_examples[i] for i in indices]
+
         # Pad with empty strings if needed
-        while len(eng_examples) < num_examples:
+        while len(eng_examples) < self.num_examples:
             eng_examples.append("")
-        while len(rus_examples) < num_examples:
+        while len(rus_examples) < self.num_examples:
             rus_examples.append("")
 
         return eng_examples, rus_examples
