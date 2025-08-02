@@ -12,16 +12,92 @@ class WordHuntParser:
 
     BASE_URL = "https://wooordhunt.ru/word/{}"
     USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+    YANDEX_DICT_URL = "https://dictionary.yandex.net/api/v1/dicservice.json/lookup"
 
-    def __init__(self, data_dir: str):
-        """Initialize the parser with output directory configuration.
+    def __init__(self, data_dir: str, yandex_api_key: str = None):
+        """Initialize the parser with output directory configuration and API key.
 
         Args:
             data_dir (str): Base directory for output files
+            yandex_api_key (str, optional): Yandex Dictionary API key for fallback translations
         """
         self.outputs_dir = os.path.join(data_dir, "outputs")
         self.output_file = os.path.join(self.outputs_dir, "word_hunt_data.csv")
         self.headers = {"User-Agent": self.USER_AGENT}
+        self.yandex_api_key = yandex_api_key
+
+    def _fetch_yandex_data(self, word: str) -> dict:
+        """Fetch word data from Yandex Dictionary API.
+
+        Args:
+            word (str): Word to look up
+
+        Returns:
+            dict: API response data or None if failed
+        """
+        if not self.yandex_api_key:
+            print("Yandex API key not provided")
+            return None
+
+        params = {"key": self.yandex_api_key, "lang": "en-ru", "text": word}
+
+        try:
+            response = requests.get(self.YANDEX_DICT_URL, params=params)
+            response.raise_for_status()
+            return response.json()
+        except (requests.RequestException, ValueError) as e:
+            print(f"Error fetching data from Yandex API for {word}: {e}")
+            return None
+
+    def _parse_yandex_data(self, data: dict, word: str) -> dict:
+        """Parse word data from Yandex Dictionary API response.
+
+        Args:
+            data (dict): API response data
+            word (str): Original word
+
+        Returns:
+            dict: Parsed word data or None if invalid
+        """
+        if not data or "def" not in data or not data["def"]:
+            return None
+
+        translations = []
+        eng_examples = []
+        rus_examples = []
+
+        for definition in data["def"]:
+            # Get translations
+            if "tr" in definition:
+                for tr in definition["tr"]:
+                    translations.append(tr.get("text", ""))
+
+                    # Get examples if available
+                    if "ex" in tr and len(eng_examples) < 5:
+                        for ex in tr["ex"]:
+                            if "text" in ex and "tr" in ex and len(eng_examples) < 5:
+                                eng_examples.append(ex["text"])
+                                rus_examples.append(ex["tr"][0]["text"])
+
+        # Fill missing examples with empty strings
+        while len(eng_examples) < 5:
+            eng_examples.append("")
+            rus_examples.append("")
+
+        result = {
+            "word": word,
+            "transcription": definition.get("ts", ""),  # Get transcription if available
+            "translation": ", ".join(translations),
+        }
+
+        # Add examples
+        for i, (eng_example, rus_example) in enumerate(
+            zip(eng_examples, rus_examples), 1
+        ):
+            result[f"eng_example{i}"] = eng_example
+            result[f"rus_example{i}"] = rus_example
+
+        return result
 
     def _fetch_from_url(self, url: str) -> list:
         """Fetch word list from URL.
@@ -252,45 +328,50 @@ class WordHuntParser:
         return eng_examples, rus_examples
 
     def parse_word_data(self, word: str) -> dict:
-        """Parse WoordHunt data for a single word.
+        """Parse word data from WoordHunt or Yandex Dictionary API.
 
         Args:
             word (str): Word to parse data for
 
         Returns:
-            dict: Parsed word data or None if failed
+            dict: Parsed word data or None if failed from both sources
         """
+        # Try WoordHunt first
         soup = self._fetch_page_content(word)
-        if not soup or not self._is_word_exists(soup, word):
-            return None
+        if soup and self._is_word_exists(soup, word):
+            # Get transcription
+            transcription = ""
+            trans_block = soup.find("div", class_="trans_sound")
+            if trans_block:
+                transcription = self.extract_transcription(trans_block)
 
-        # Get transcription
-        transcription = ""
-        trans_block = soup.find("div", class_="trans_sound")
-        if trans_block:
-            transcription = self.extract_transcription(trans_block)
+            # Get translation
+            translation = self._extract_translation(soup, word)
+            if translation:
+                # Get examples
+                example_block = self._get_example_block(soup)
+                eng_examples, rus_examples = self._extract_examples(example_block)
 
-        # Get translation
-        translation = self._extract_translation(soup, word)
-        if not translation:
-            return None
+                examples_dict = {
+                    "word": word,
+                    "transcription": transcription,
+                    "translation": translation,
+                }
+                for i, (eng_example, rus_example) in enumerate(
+                    zip(eng_examples, rus_examples), 1
+                ):
+                    examples_dict[f"eng_example{i}"] = eng_example
+                    examples_dict[f"rus_example{i}"] = rus_example
 
-        # Get examples
-        example_block = self._get_example_block(soup)
-        eng_examples, rus_examples = self._extract_examples(example_block)
+                return examples_dict
 
-        examples_dict = {
-            "word": word,
-            "transcription": transcription,
-            "translation": translation,
-        }
-        for i, (eng_example, rus_example) in enumerate(
-            zip(eng_examples, rus_examples), 1
-        ):
-            examples_dict[f"eng_example{i}"] = eng_example
-            examples_dict[f"rus_example{i}"] = rus_example
+        # If WoordHunt fails, try Yandex API
+        print(f"Falling back to Yandex API for word '{word}'")
+        yandex_data = self._fetch_yandex_data(word)
+        if yandex_data:
+            return self._parse_yandex_data(yandex_data, word)
 
-        return examples_dict
+        return None
 
     def _get_next_file_number(self) -> int:
         """Find the next available file number by checking existing files.
