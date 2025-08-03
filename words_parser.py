@@ -1,4 +1,5 @@
 import os
+import random
 import csv
 import tracemalloc
 import requests
@@ -8,11 +9,11 @@ tracemalloc.start()
 
 
 class WordHuntParser:
-    """A class for parsing word definitions and examples from WoordHunt website."""
+    """A class for parsing word definitions and examples primarily from Yandex Dictionary API with WoordHunt as a backup for examples."""
 
-    BASE_URL = "https://wooordhunt.ru/word/{}"
-    USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
     YANDEX_DICT_URL = "https://dictionary.yandex.net/api/v1/dicservice.json/lookup"
+    BASE_URL = "https://wooordhunt.ru/word/{}"  # Used as backup for examples
+    USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
 
     def __init__(
         self, data_dir: str, yandex_api_key: str = None, num_examples: int = 5
@@ -85,8 +86,6 @@ class WordHuntParser:
 
         # Randomly select examples if we have more than needed
         if len(eng_examples) > self.num_examples:
-            import random
-
             indices = random.sample(range(len(eng_examples)), self.num_examples)
             eng_examples = [eng_examples[i] for i in indices]
             rus_examples = [rus_examples[i] for i in indices]
@@ -157,79 +156,6 @@ class WordHuntParser:
             return self._fetch_from_url(source)
         return self._fetch_from_file(source)
 
-    def _format_transcription(self, text: str) -> str:
-        """Format transcription by replacing pipes with brackets.
-
-        Args:
-            text (str): Raw transcription text
-
-        Returns:
-            str: Formatted transcription
-        """
-        parts = text.split("|")
-        if len(parts) >= 3:
-            return f"[{parts[1]}]"
-        return text
-
-    def _extract_pattern1_transcription(self, trans_block) -> str:
-        """Extract transcription using pattern 1 (with "амер." marker).
-
-        Args:
-            trans_block: BeautifulSoup element containing transcription
-
-        Returns:
-            str: Extracted transcription or None
-        """
-        amer_div = trans_block.find("i", string="амер.")
-        if not amer_div:
-            return None
-
-        trans_div = amer_div.find_parent("div", class_="trans_sound")
-        if not trans_div:
-            return None
-
-        amer_section = amer_div.find_parent("div").find_next_sibling("div")
-        if not amer_section:
-            return None
-
-        transcriptions = [
-            self._format_transcription(span.get_text(strip=True))
-            for span in amer_section.find_all("span", class_="transcription")
-        ]
-        return ", ".join(transcriptions) if transcriptions else None
-
-    def _extract_pattern2_transcription(self, trans_block) -> str:
-        """Extract transcription using pattern 2 (with us_tr_sound ID).
-
-        Args:
-            trans_block: BeautifulSoup element containing transcription
-
-        Returns:
-            str: Extracted transcription or None
-        """
-        us_div = trans_block.find("div", id="us_tr_sound")
-        if not us_div:
-            return None
-
-        transcription = us_div.find("span", class_="transcription")
-        if not transcription:
-            return None
-
-        return self._format_transcription(transcription.get_text(strip=True))
-
-    def extract_transcription(self, trans_block) -> str:
-        """Extract American English transcription from the page.
-
-        Args:
-            trans_block: BeautifulSoup element containing transcription
-
-        Returns:
-            str: Extracted transcription or None
-        """
-        return self._extract_pattern1_transcription(
-            trans_block
-        ) or self._extract_pattern2_transcription(trans_block)
-
     def _fetch_page_content(self, word: str) -> BeautifulSoup:
         """Fetch and parse the webpage for a given word.
 
@@ -266,22 +192,6 @@ class WordHuntParser:
             print(f"Word '{word}' not found in WoordHunt")
             return False
         return True
-
-    def _extract_translation(self, soup: BeautifulSoup, word: str) -> str:
-        """Extract word translation from the page.
-
-        Args:
-            soup (BeautifulSoup): Parsed page content
-            word (str): Word being looked up
-
-        Returns:
-            str: Translation or None if not found
-        """
-        translation_block = soup.find("div", class_="t_inline_en")
-        if not translation_block:
-            print(f"Word '{word}' doesn't have a translation")
-            return None
-        return translation_block.text.strip()
 
     def _get_example_block(self, soup: BeautifulSoup):
         """Get the block containing usage examples.
@@ -328,8 +238,6 @@ class WordHuntParser:
 
             # Randomly select up to self.num_examples if we have more
             if len(eng_examples) > self.num_examples:
-                import random
-
                 indices = random.sample(range(len(eng_examples)), self.num_examples)
                 eng_examples = [eng_examples[i] for i in indices]
                 rus_examples = [rus_examples[i] for i in indices]
@@ -343,7 +251,7 @@ class WordHuntParser:
         return eng_examples, rus_examples
 
     def parse_word_data(self, word: str) -> dict:
-        """Parse word data from WoordHunt or Yandex Dictionary API.
+        """Parse word data primarily from Yandex Dictionary API, using WoordHunt as backup for examples.
 
         Args:
             word (str): Word to parse data for
@@ -351,42 +259,37 @@ class WordHuntParser:
         Returns:
             dict: Parsed word data or None if failed from both sources
         """
-        # Try WoordHunt first
-        soup = self._fetch_page_content(word)
-        if soup and self._is_word_exists(soup, word):
-            # Get transcription
-            transcription = ""
-            trans_block = soup.find("div", class_="trans_sound")
-            if trans_block:
-                transcription = self.extract_transcription(trans_block)
-
-            # Get translation
-            translation = self._extract_translation(soup, word)
-            if translation:
-                # Get examples
-                example_block = self._get_example_block(soup)
-                eng_examples, rus_examples = self._extract_examples(example_block)
-
-                examples_dict = {
-                    "word": word,
-                    "transcription": transcription,
-                    "translation": translation,
-                }
-                for i, (eng_example, rus_example) in enumerate(
-                    zip(eng_examples, rus_examples), 1
-                ):
-                    examples_dict[f"eng_example{i}"] = eng_example
-                    examples_dict[f"rus_example{i}"] = rus_example
-
-                return examples_dict
-
-        # If WoordHunt fails, try Yandex API
-        print(f"Falling back to Yandex API for word '{word}'")
+        # Try Yandex API first
         yandex_data = self._fetch_yandex_data(word)
-        if yandex_data:
-            return self._parse_yandex_data(yandex_data, word)
+        if not yandex_data:
+            print(f"Failed to get data from Yandex API for '{word}'")
+            return None
 
-        return None
+        parsed_data = self._parse_yandex_data(yandex_data, word)
+        if not parsed_data:
+            print(f"Failed to parse Yandex API data for '{word}'")
+            return None
+
+        # If we don't have enough examples from Yandex, try to get more from WoordHunt
+        eng_examples = [
+            parsed_data.get(f"eng_example{i}", "")
+            for i in range(1, self.num_examples + 1)
+        ]
+        if "" in eng_examples:  # Check if we're missing any examples
+            soup = self._fetch_page_content(word)
+            if soup and self._is_word_exists(soup, word):
+                example_block = self._get_example_block(soup)
+                wh_eng_examples, wh_rus_examples = self._extract_examples(example_block)
+
+                # Fill in missing examples from WoordHunt
+                for i in range(self.num_examples):
+                    if not parsed_data.get(f"eng_example{i + 1}") and i < len(
+                        wh_eng_examples
+                    ):
+                        parsed_data[f"eng_example{i + 1}"] = wh_eng_examples[i]
+                        parsed_data[f"rus_example{i + 1}"] = wh_rus_examples[i]
+
+        return parsed_data
 
     def _get_next_file_number(self) -> int:
         """Find the next available file number by checking existing files.
@@ -498,7 +401,7 @@ class WordHuntParser:
         batch_number = self._get_next_file_number()
 
         for i, word in enumerate(words, start_index + 1):
-            print(f"Processing {i}/{len(words)}: {word}")
+            print(f"Processing {i - start_index}/{len(words)}: {word}")
             word_data = self.parse_word_data(word)
 
             if word_data:
