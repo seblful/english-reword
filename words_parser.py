@@ -1,114 +1,38 @@
 import os
+import time
 import random
 import csv
-import tracemalloc
 import requests
+
 from bs4 import BeautifulSoup
+import cloudscraper
+from fake_useragent import UserAgent
 
-tracemalloc.start()
 
-
-class WordHuntParser:
-    """A class for parsing word definitions and examples primarily from Yandex Dictionary API with WoordHunt as a backup for examples."""
+class WordParser:
+    """A class for parsing word definitions from Yandex Dictionary API and examples from Reverso Context."""
 
     YANDEX_DICT_URL = "https://dictionary.yandex.net/api/v1/dicservice.json/lookup"
-    BASE_URL = "https://wooordhunt.ru/word/{}"  # Used as backup for examples
-    USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+    REVERSO_API_URL = "https://context.reverso.net/translation/english-russian/{}"
 
     def __init__(
         self, data_dir: str, yandex_api_key: str = None, num_examples: int = 5
     ):
-        """Initialize the parser with output directory configuration and API key.
+        """Initialize the parser with output directory configuration and API keys.
 
         Args:
             data_dir (str): Base directory for output files
-            yandex_api_key (str, optional): Yandex Dictionary API key for fallback translations
+            yandex_api_key (str, optional): Yandex Dictionary API key for translations
             num_examples (int, optional): Number of examples to extract for each word. Defaults to 5
         """
         self.outputs_dir = os.path.join(data_dir, "outputs")
-        self.output_file = os.path.join(self.outputs_dir, "word_hunt_data.csv")
-        self.headers = {"User-Agent": self.USER_AGENT}
+        self.output_file = os.path.join(self.outputs_dir, "word_data.csv")
+        self.not_found_file = os.path.join(self.outputs_dir, "not_found_words.txt")
+
+        self.user_agent = UserAgent()
         self.yandex_api_key = yandex_api_key
+
         self.num_examples = num_examples
-
-    def _fetch_yandex_data(self, word: str) -> dict:
-        """Fetch word data from Yandex Dictionary API.
-
-        Args:
-            word (str): Word to look up
-
-        Returns:
-            dict: API response data or None if failed
-        """
-        if not self.yandex_api_key:
-            print("Yandex API key not provided")
-            return None
-
-        params = {"key": self.yandex_api_key, "lang": "en-ru", "text": word}
-
-        try:
-            response = requests.get(self.YANDEX_DICT_URL, params=params)
-            response.raise_for_status()
-            return response.json()
-        except (requests.RequestException, ValueError) as e:
-            print(f"Error fetching data from Yandex API for {word}: {e}")
-            return None
-
-    def _parse_yandex_data(self, data: dict, word: str) -> dict:
-        """Parse word data from Yandex Dictionary API response.
-
-        Args:
-            data (dict): API response data
-            word (str): Original word
-
-        Returns:
-            dict: Parsed word data or None if invalid
-        """
-        if not data or "def" not in data or not data["def"]:
-            return None
-
-        translations = []
-        eng_examples = []
-        rus_examples = []
-
-        for definition in data["def"]:
-            # Get translations
-            if "tr" in definition:
-                for tr in definition["tr"]:
-                    translations.append(tr.get("text", ""))
-
-                    # Get all available examples
-                    if "ex" in tr:
-                        for ex in tr["ex"]:
-                            if "text" in ex and "tr" in ex:
-                                eng_examples.append(ex["text"])
-                                rus_examples.append(ex["tr"][0]["text"])
-
-        # Randomly select examples if we have more than needed
-        if len(eng_examples) > self.num_examples:
-            indices = random.sample(range(len(eng_examples)), self.num_examples)
-            eng_examples = [eng_examples[i] for i in indices]
-            rus_examples = [rus_examples[i] for i in indices]
-
-        # Fill missing examples with empty strings
-        while len(eng_examples) < self.num_examples:
-            eng_examples.append("")
-            rus_examples.append("")
-
-        result = {
-            "word": word,
-            "transcription": definition.get("ts", ""),  # Get transcription if available
-            "translation": ", ".join(translations),
-        }
-
-        # Add examples
-        for i, (eng_example, rus_example) in enumerate(
-            zip(eng_examples, rus_examples), 1
-        ):
-            result[f"eng_example{i}"] = eng_example
-            result[f"rus_example{i}"] = rus_example
-
-        return result
 
     def _fetch_from_url(self, url: str) -> list:
         """Fetch word list from URL.
@@ -156,91 +80,175 @@ class WordHuntParser:
             return self._fetch_from_url(source)
         return self._fetch_from_file(source)
 
-    def _fetch_page_content(self, word: str) -> BeautifulSoup:
-        """Fetch and parse the webpage for a given word.
+    def _log_not_found_word(self, word: str) -> None:
+        """Log words that weren't found in any source.
+
+        Args:
+            word (str): The word that wasn't found
+        """
+        try:
+            with open(self.not_found_file, "a", encoding="utf-8") as f:
+                f.write(f"{word}\n")
+        except IOError as e:
+            print(f"Error logging not found word {word}: {e}")
+
+    def _get_yandex_response(self, word: str) -> requests.Response:
+        """Fetch word data from Yandex Dictionary API.
 
         Args:
             word (str): Word to look up
 
         Returns:
-            BeautifulSoup: Parsed page content or None if failed
+            requests.Response: API response data or None if failed
         """
-        url = self.BASE_URL.format(word.lower())
-        try:
-            response = requests.get(url, headers=self.headers)
-            response.raise_for_status()
-            return BeautifulSoup(response.text, "html.parser")
-        except requests.RequestException as e:
-            print(f"Error fetching data for {word}: {e}")
+        if not self.yandex_api_key:
+            print("Yandex API key not provided")
             return None
 
-    def _is_word_exists(self, soup: BeautifulSoup, word: str) -> bool:
-        """Check if the word exists in the dictionary.
+        params = {"key": self.yandex_api_key, "lang": "en-ru", "text": word}
+
+        try:
+            response = requests.get(self.YANDEX_DICT_URL, params=params)
+            response.raise_for_status()
+
+            return response
+
+        except (requests.RequestException, ValueError) as e:
+            print(f"Error fetching data from Yandex API for '{word}': {e}")
+            return None
+
+    def _parse_yandex_response(self, response: requests.Response, word: str) -> dict:
+        """Parse translations from Yandex Dictionary API response.
 
         Args:
-            soup (BeautifulSoup): Parsed page content
-            word (str): Word being looked up
+            response (requests.Response): API response data from Yandex Dictionary
+            word (str): The word that was looked up
 
         Returns:
-            bool: True if word exists, False otherwise
+            dict: Parsed word data or None if invalid
         """
-        if (
-            "Проверьте нет ли опечатки. Если такое слово существует, то мы постараемся это исправить."
-            in soup.text
-            or "В тексте песен:" in soup.text
-        ):
-            print(f"Word '{word}' not found in WoordHunt")
-            return False
-        return True
+        if not response:
+            return None
 
-    def _get_example_block(self, soup: BeautifulSoup):
-        """Get the block containing usage examples.
+        data = response.json()
+
+        # Check if no definitions were found
+        if not data or "def" not in data or not data["def"]:
+            print(f"No definitions found for '{word}' in Yandex Dictionary")
+            return None
+
+        transcription = data["def"][0]
+        transcription = transcription.get("ts", "")
+        transcription = f"[{transcription}]" if transcription else ""
+
+        translations = []
+        for definition in data["def"]:
+            if "tr" in definition:
+                for tr in definition["tr"]:
+                    translations.append(tr.get("text", ""))
+
+        if not translations:
+            return None
+
+        # Only include transcription and translations
+        result = {
+            "transcription": transcription,
+            "translations": translations,
+        }
+
+        return result
+
+    def _get_reverso_response(self, word: str, retries: int = 5) -> requests.Response:
+        """Fetch examples from Reverso Context.
 
         Args:
-            soup (BeautifulSoup): Parsed page content
+            word (str): Word to look up examples for
 
         Returns:
-            element: BeautifulSoup element containing examples
+            requests.Response: Response or None if failed
         """
-        return soup.find(
-            lambda tag: tag.name == "div"
-            and tag.get("class") == ["block"]
-            and not tag.has_attr("id")
+
+        scraper = cloudscraper.create_scraper(
+            browser={"custom": self.user_agent.random}
         )
+        url = self.REVERSO_API_URL.format(word)
+        for attempt in range(retries):
+            try:
+                response = scraper.get(url)
+                response.raise_for_status()
+                return response
 
-    def _extract_examples(self, example_block) -> tuple[list, list]:
-        """Extract examples and their translations.
+            except (requests.RequestException, ValueError) as e:
+                print(f"Error fetching data from Reverso Context for '{word}': {e}")
+
+            print(f"Attempt {attempt + 1} of {retries} failed. Retrying...")
+            time.sleep(3)
+
+        print(
+            f"Failed to fetch data from Reverso Context for '{word}' after {retries} attempts."
+        )
+        return None
+
+    def _parse_reverso_response(self, response: requests.Response, word: str) -> dict:
+        """Parse examples from Reverso Context response.
 
         Args:
-            example_block: BeautifulSoup element containing examples
+            response (requests.Response): Response data from Reverso Context
+            word (str): The word that was looked up
 
         Returns:
-            tuple: Lists of examples and their translations
+            dict: Parsed data or None if invalid
         """
+        if not response:
+            return None
+
+        soup = BeautifulSoup(response.text, "html.parser")
+
+        # Transcription extraction
+        transcription_block = soup.select_one("#transliteration-content .ipa")
+        if transcription_block:
+            transcription = transcription_block.text.strip("/").strip()
+            transcription = f"[{transcription}]" if transcription else ""
+        else:
+            transcription = ""
+
+        # Translation extraction
+        translations = []
+        translation_block = soup.find("div", id="translations-content")
+        if translation_block:
+            for translation in translation_block.find_all("a", class_="translation"):
+                # Get just the display term, excluding any gender markers
+                display_term = translation.find("span", class_="display-term")
+                if display_term:
+                    translations.append(display_term.get_text(strip=True))
+
+        # Example extraction
         eng_examples = []
         rus_examples = []
 
-        if example_block:
-            eng_example_blocks = example_block.find_all("p", class_="ex_o")
-
-            # Collect all available examples
-            for eng_example_block in eng_example_blocks:
-                eng_example = eng_example_block.get_text(strip=True)
-                rus_example_block = eng_example_block.find_next(
-                    "p", class_="ex_t human"
+        examples_section = soup.find("section", id="examples-content")
+        if examples_section:
+            for example in examples_section.find_all("div", class_="example"):
+                eng_example = (
+                    example.find("div", class_="src").get_text(strip=False).strip()
                 )
+                rus_example = (
+                    example.find("div", class_="trg").get_text(strip=False).strip()
+                )
+                eng_examples.append(eng_example)
+                rus_examples.append(rus_example)
 
-                # Only add the example if we have both English and Russian text
-                if rus_example_block:
-                    rus_example = rus_example_block.get_text(strip=True)
-                    eng_examples.append(eng_example)
-                    rus_examples.append(rus_example)
+        # If no examples found print a warning
+        if not eng_examples and not rus_examples:
+            print(f"No examples found for '{word}' in Reverso Context")
+            if not translations and not transcription:
+                return None
 
-            # Randomly select up to self.num_examples if we have more
-            if len(eng_examples) > self.num_examples:
-                indices = random.sample(range(len(eng_examples)), self.num_examples)
-                eng_examples = [eng_examples[i] for i in indices]
-                rus_examples = [rus_examples[i] for i in indices]
+        # Randomly select up to self.num_examples if we have more
+        if len(eng_examples) > self.num_examples:
+            indices = random.sample(range(len(eng_examples)), self.num_examples)
+            eng_examples = [eng_examples[i] for i in indices]
+            rus_examples = [rus_examples[i] for i in indices]
 
         # Pad with empty strings if needed
         while len(eng_examples) < self.num_examples:
@@ -248,46 +256,72 @@ class WordHuntParser:
         while len(rus_examples) < self.num_examples:
             rus_examples.append("")
 
-        return eng_examples, rus_examples
+        result = {
+            "transcription": transcription,
+            "translations": translations,
+            "eng_examples": eng_examples,
+            "rus_examples": rus_examples,
+        }
 
-    def parse_word_data(self, word: str) -> dict:
-        """Parse word data primarily from Yandex Dictionary API, using WoordHunt as backup for examples.
+        return result
+
+    def parse_word_data(self, word: str) -> dict | None:
+        """Parse word data from Yandex Dictionary API and examples from Reverso Context.
 
         Args:
-            word (str): Word to parse data for
+            word: The word to look up and parse data for.
 
         Returns:
-            dict: Parsed word data or None if failed from both sources
+            A dictionary containing the parsed word data with structure:
+            {
+                "word": str,
+                "transcription": str,
+                "translations": str,  # semicolon-separated
+                "eng_example1": str,  # example sentences
+                "rus_example1": str,
+                ...
+            }
+            Returns None if the word wasn't found in either source.
         """
-        # Try Yandex API first
-        yandex_data = self._fetch_yandex_data(word)
-        if not yandex_data:
-            print(f"Failed to get data from Yandex API for '{word}'")
+        parsed_data = {"word": word}
+
+        # Try Yandex Dictionary first
+        yandex_data = self._parse_yandex_response(self._get_yandex_response(word), word)
+        if yandex_data:
+            parsed_data.update(
+                {
+                    "transcription": yandex_data.get("transcription", ""),
+                    "translations": ", ".join(yandex_data.get("translations", [])),
+                }
+            )
+
+        # Try Reverso Context for examples and fallback translations
+        reverso_data = self._parse_reverso_response(
+            self._get_reverso_response(word), word
+        )
+        if reverso_data:
+            if not yandex_data:
+                parsed_data["transcription"] = reverso_data.get("transcription", "")
+                parsed_data["translations"] = ", ".join(
+                    reverso_data.get("translations", [])
+                )
+
+            # Add examples if available
+            for i, (eng, rus) in enumerate(
+                zip(
+                    reverso_data.get("eng_examples", []),
+                    reverso_data.get("rus_examples", []),
+                ),
+                1,
+            ):
+                parsed_data[f"eng_example{i}"] = eng
+                parsed_data[f"rus_example{i}"] = rus
+
+        # Return None if no data was found
+        if not yandex_data and not reverso_data:
+            self._log_not_found_word(word)
+            print(f"No data found for word: '{word}'")
             return None
-
-        parsed_data = self._parse_yandex_data(yandex_data, word)
-        if not parsed_data:
-            print(f"Failed to parse Yandex API data for '{word}'")
-            return None
-
-        # If we don't have enough examples from Yandex, try to get more from WoordHunt
-        eng_examples = [
-            parsed_data.get(f"eng_example{i}", "")
-            for i in range(1, self.num_examples + 1)
-        ]
-        if "" in eng_examples:  # Check if we're missing any examples
-            soup = self._fetch_page_content(word)
-            if soup and self._is_word_exists(soup, word):
-                example_block = self._get_example_block(soup)
-                wh_eng_examples, wh_rus_examples = self._extract_examples(example_block)
-
-                # Fill in missing examples from WoordHunt
-                for i in range(self.num_examples):
-                    if not parsed_data.get(f"eng_example{i + 1}") and i < len(
-                        wh_eng_examples
-                    ):
-                        parsed_data[f"eng_example{i + 1}"] = wh_eng_examples[i]
-                        parsed_data[f"rus_example{i + 1}"] = wh_rus_examples[i]
 
         return parsed_data
 
@@ -401,7 +435,7 @@ class WordHuntParser:
         batch_number = self._get_next_file_number()
 
         for i, word in enumerate(words, start_index + 1):
-            print(f"Processing {i - start_index}/{len(words)}: {word}")
+            print(f"Processing {i - start_index}/{len(words)}: '{word}'")
             word_data = self.parse_word_data(word)
 
             if word_data:
